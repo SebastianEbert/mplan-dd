@@ -1,4 +1,4 @@
-# mplan
+# mplan tool
 
 A bash script for browsing this week's meals at Dresden mensas, powered by the [OpenMensa API](https://docs.openmensa.org/api/v2/overview/).
 

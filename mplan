@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+API="https://openmensa.org/api/v2"
+LAT="51.0504"
+LNG="13.7373"
+DIST="20"
+
+# ANSI color codes
+R=$'\033[0m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+RED=$'\033[31m'
+GREEN=$'\033[32m'
+YELLOW=$'\033[33m'
+GRAY=$'\033[90m'
+B_GREEN=$'\033[1;32m'
+B_YELLOW=$'\033[1;33m'
+B_BLUE=$'\033[1;34m'
+B_CYAN=$'\033[1;36m'
+
+die() { echo "Error: $*" >&2; exit 1; }
+
+requires() {
+    for cmd in "$@"; do
+        command -v "$cmd" &>/dev/null || die "'$cmd' is required but not installed."
+    done
+}
+
+fetch_mensas() {
+    curl -sfg "$API/canteens?near[lat]=$LAT&near[lng]=$LNG&near[dist]=$DIST&per_page=100"
+}
+
+week_dates() {
+    local dow monday
+    dow=$(date +%u)
+    monday=$(date -d "$(date +%Y-%m-%d) -$((dow - 1)) days" +%Y-%m-%d)
+    for i in 0 1 2 3 4; do
+        date -d "$monday +$i days" +%Y-%m-%d
+    done
+}
+
+cmd_list() {
+    echo
+    printf "${B_BLUE}Mensas near Dresden${R}\n"
+    printf "${DIM}──────────────────────────────────────────────────────────────────${R}\n"
+    fetch_mensas | jq -r '.[] | "\(.id)\t\(.name)\t\(.address)"' | \
+        awk -F'\t' -v bold="$BOLD" -v cyan="$B_CYAN" -v r="$R" -v dim="$DIM" \
+            '{ printf "  %s%5s%s  %s%-42s%s  %s%s%s\n", cyan, $1, r, bold, $2, r, dim, $3, r }'
+    echo
+}
+
+# Reads meals JSON from stdin, prints colored output
+format_meals() {
+    jq -r \
+        --arg R       "$R"       \
+        --arg BOLD    "$BOLD"    \
+        --arg DIM     "$DIM"     \
+        --arg GREEN   "$GREEN"   \
+        --arg B_GREEN "$B_GREEN" \
+        --arg YELLOW  "$YELLOW"  \
+        --arg B_CYAN  "$B_CYAN"  \
+        --arg GRAY    "$GRAY"    \
+    '.[] |
+    (
+        if   ([.notes[] | select(test("vegan";   "i"))] | length) > 0 then " \($B_GREEN)[vegan]\($R)"
+        elif ([.notes[] | select(test("vegetar"; "i"))] | length) > 0 then " \($GREEN)[vegetarisch]\($R)"
+        else "" end
+    ) as $badge |
+    "  \($B_CYAN)[\(.category)]\($R) \($BOLD)\(.name)\($R)\($badge)" +
+    "\n     \($B_GREEN)\(.prices.students  // "—")€\($R) \($DIM)Stud\($R)" +
+      "  \($YELLOW)\(.prices.employees // "—")€\($R) \($DIM)Emp\($R)" +
+    (if (.notes | length) > 0 then "\n     \($GRAY)\(.notes | join(", "))\($R)" else "" end)'
+}
+
+# Reads a single meal JSON object from stdin, prints colored output
+format_one_meal() {
+    jq -r \
+        --arg R       "$R"       \
+        --arg BOLD    "$BOLD"    \
+        --arg DIM     "$DIM"     \
+        --arg GREEN   "$GREEN"   \
+        --arg B_GREEN "$B_GREEN" \
+        --arg YELLOW  "$YELLOW"  \
+        --arg B_CYAN  "$B_CYAN"  \
+        --arg GRAY    "$GRAY"    \
+    '(
+        if   ([.notes[] | select(test("vegan";   "i"))] | length) > 0 then " \($B_GREEN)[vegan]\($R)"
+        elif ([.notes[] | select(test("vegetar"; "i"))] | length) > 0 then " \($GREEN)[vegetarisch]\($R)"
+        else "" end
+    ) as $badge |
+    "  \($B_CYAN)[\(.category)]\($R) \($BOLD)\(.name)\($R)\($badge)" +
+    "\n     \($B_GREEN)\(.prices.students  // "—")€\($R) \($DIM)Stud\($R)" +
+      "  \($YELLOW)\(.prices.employees // "—")€\($R) \($DIM)Emp\($R)" +
+    (if (.notes | length) > 0 then "\n     \($GRAY)\(.notes | join(", "))\($R)" else "" end)'
+}
+
+# parse_mensa_ids <args...>
+# Populates global _MENSA_IDS array from -m/--mensa args, or fetches all near Dresden.
+parse_mensa_ids() {
+    _MENSA_IDS=()
+    _SHOW_IMAGES=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mensa | -m)
+                [[ -n "${2:-}" ]] || die "--mensa requires a value"
+                IFS=',' read -ra _MENSA_IDS <<< "$2"
+                _SHOW_IMAGES=true
+                shift 2
+                ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+    if [[ ${#_MENSA_IDS[@]} -eq 0 ]]; then
+        mapfile -t _MENSA_IDS < <(fetch_mensas | jq -r '.[].id')
+    fi
+}
+
+# show_meals <date...>
+# Displays meals for each date across all IDs in _MENSA_IDS.
+show_meals() {
+    local dates=("$@")
+
+    if [[ "$_SHOW_IMAGES" == "true" ]] && ! command -v chafa &>/dev/null; then
+        printf "${YELLOW}Note: install 'chafa' (apt install chafa) to display meal images.${R}\n"
+        _SHOW_IMAGES=false
+    fi
+
+    for id in "${_MENSA_IDS[@]}"; do
+        local name
+        name=$(curl -sf "$API/canteens/$id" | jq -r '.name') \
+            || { printf "${RED}Could not fetch mensa %s${R}\n" "$id" >&2; continue; }
+
+        echo
+        printf "${B_BLUE}▶ %s${R}  ${DIM}ID %s${R}\n" "$name" "$id"
+        printf "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${R}\n"
+
+        for date in "${dates[@]}"; do
+            printf "\n  ${B_YELLOW}%s${R}\n" "$(date -d "$date" '+%A, %d %b %Y')"
+
+            local day
+            if ! day=$(curl -sf "$API/canteens/$id/days/$date" 2>/dev/null); then
+                printf "  ${DIM}No data${R}\n"
+                continue
+            fi
+
+            if [[ $(echo "$day" | jq -r '.closed') == "true" ]]; then
+                printf "  ${RED}Closed${R}\n"
+                continue
+            fi
+
+            local meals_json
+            if ! meals_json=$(curl -sf "$API/canteens/$id/days/$date/meals" 2>/dev/null); then
+                printf "  ${DIM}No meals listed${R}\n"
+                continue
+            fi
+
+            local count
+            count=$(echo "$meals_json" | jq 'length')
+            if [[ $count -eq 0 ]]; then
+                printf "  ${DIM}No meals listed${R}\n"
+            elif [[ "$_SHOW_IMAGES" == "true" ]]; then
+                while IFS= read -r meal; do
+                    echo "$meal" | format_one_meal
+                    local img
+                    img=$(echo "$meal" | jq -r '.image // empty')
+                    if [[ -n "$img" ]]; then
+                        echo
+                        curl -sf "$img" | chafa --size=60x15 -
+                    fi
+                    echo
+                done < <(echo "$meals_json" | jq -c '.[]')
+            else
+                echo "$meals_json" | format_meals
+            fi
+        done
+        echo
+    done
+}
+
+cmd_today() {
+    parse_mensa_ids "$@"
+    show_meals "$(date +%Y-%m-%d)"
+}
+
+cmd_week() {
+    parse_mensa_ids "$@"
+    local dates
+    mapfile -t dates < <(week_dates)
+    show_meals "${dates[@]}"
+}
+
+usage() {
+    printf "${BOLD}mplan${R} — Dresden mensa meal planner\n\n"
+    printf "${BOLD}Usage:${R}\n"
+    printf "  mplan list                       List all mensas near Dresden with their IDs\n"
+    printf "  mplan today [-m ID[,ID,...]]     Show today's meals\n"
+    printf "  mplan week  [-m ID[,ID,...]]     Show this week's meals (Mon–Fri)\n"
+    printf "  mplan am                         Shortcut: today at Alte Mensa (ID 79)\n\n"
+    printf "${BOLD}Options:${R}\n"
+    printf "  -m, --mensa ID[,ID,...]   Comma-separated mensa IDs (default: all near Dresden)\n\n"
+    printf "${BOLD}Examples:${R}\n"
+    printf "  mplan list\n"
+    printf "  mplan today -m 80\n"
+    printf "  mplan week --mensa 80,82\n"
+}
+
+_SHOW_IMAGES=false
+
+requires curl jq
+
+case "${1:-help}" in
+    list)               cmd_list ;;
+    today) shift;       cmd_today "$@" ;;
+    week)  shift;       cmd_week  "$@" ;;
+    am)                 _MENSA_IDS=(79); _SHOW_IMAGES=true; show_meals "$(date +%Y-%m-%d)" ;;
+    -h | --help | help) usage ;;
+    *) printf "Unknown command: %s\n" "$1" >&2; usage >&2; exit 1 ;;
+esac
